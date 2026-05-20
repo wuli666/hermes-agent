@@ -1194,33 +1194,53 @@ class ProcessRegistry:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    def list_sessions(self, task_id: str = None) -> list:
-        """List all running and recently-finished processes."""
+    def list_sessions(self, task_id: str = None, include_other_running: bool = False) -> list:
+        """List running and recently-finished processes.
+
+        When *task_id* is given, results are scoped to that task. Set
+        *include_other_running* to also surface processes still running
+        under a *different* task/session scope — the background servers and
+        forgotten dev tools that can silently block gateway session reset
+        (issue #29177). Without this the agent's ``process list`` returns
+        ``[]`` for a task that spawned nothing, leaving the user and agent
+        unable to discover what is keeping a session alive. Each entry is
+        tagged with ``scope`` ("task" for the current task, "other" for
+        processes outside it) so callers can tell them apart.
+        """
         with self._lock:
             all_sessions = list(self._running.values()) + list(self._finished.values())
 
         all_sessions = [self._refresh_detached_session(s) for s in all_sessions]
 
         if task_id:
-            all_sessions = [s for s in all_sessions if s.task_id == task_id]
+            in_scope = [s for s in all_sessions if s.task_id == task_id]
+            other_running = (
+                [s for s in all_sessions if s.task_id != task_id and not s.exited]
+                if include_other_running else []
+            )
+        else:
+            in_scope = all_sessions
+            other_running = []
 
         result = []
-        for s in all_sessions:
-            entry = {
-                "session_id": s.id,
-                "command": s.command[:200],
-                "cwd": s.cwd,
-                "pid": s.pid,
-                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(s.started_at)),
-                "uptime_seconds": int(time.time() - s.started_at),
-                "status": "exited" if s.exited else "running",
-                "output_preview": s.output_buffer[-200:] if s.output_buffer else "",
-            }
-            if s.exited:
-                entry["exit_code"] = s.exit_code
-            if s.detached:
-                entry["detached"] = True
-            result.append(entry)
+        for scope, sessions in (("task", in_scope), ("other", other_running)):
+            for s in sessions:
+                entry = {
+                    "session_id": s.id,
+                    "command": s.command[:200],
+                    "cwd": s.cwd,
+                    "pid": s.pid,
+                    "started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(s.started_at)),
+                    "uptime_seconds": int(time.time() - s.started_at),
+                    "status": "exited" if s.exited else "running",
+                    "output_preview": s.output_buffer[-200:] if s.output_buffer else "",
+                    "scope": scope,
+                }
+                if s.exited:
+                    entry["exit_code"] = s.exit_code
+                if s.detached:
+                    entry["detached"] = True
+                result.append(entry)
         return result
 
     # ----- Session/Task Queries (for gateway integration) -----
@@ -1513,7 +1533,13 @@ def _handle_process(args, **kw):
     session_id = str(args.get("session_id", "")) if args.get("session_id") is not None else ""
 
     if action == "list":
-        return json.dumps({"processes": process_registry.list_sessions(task_id=task_id)}, ensure_ascii=False)
+        # include_other_running so the agent can see background processes
+        # running outside this task's scope — otherwise a session blocked
+        # from reset by a forgotten preview server is invisible here (#29177).
+        return json.dumps(
+            {"processes": process_registry.list_sessions(task_id=task_id, include_other_running=True)},
+            ensure_ascii=False,
+        )
     elif action in {"poll", "log", "wait", "kill", "write", "submit", "close"}:
         if not session_id:
             return tool_error(f"session_id is required for {action}")

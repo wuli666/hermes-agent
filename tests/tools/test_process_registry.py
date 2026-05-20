@@ -363,6 +363,43 @@ class TestListSessions:
         assert "pid" in entry
         assert "output_preview" in entry
 
+    # --- cross-scope visibility (issue #29177, Bug 2) --------------------
+
+    def test_task_scope_hides_other_running_by_default(self, registry):
+        """Default behavior is unchanged: a task only sees its own processes."""
+        mine = _make_session(sid="proc_mine", task_id="t1")
+        other = _make_session(sid="proc_other", task_id="t2")
+        registry._running[mine.id] = mine
+        registry._running[other.id] = other
+        result = registry.list_sessions(task_id="t1")
+        assert [e["session_id"] for e in result] == ["proc_mine"]
+
+    def test_include_other_running_surfaces_cross_scope_processes(self, registry):
+        """include_other_running exposes background procs in other scopes —
+        e.g. a preview server blocking session reset that the agent's own
+        task scope cannot otherwise see (returned [] pre-fix)."""
+        mine = _make_session(sid="proc_mine", task_id="t1")
+        other = _make_session(sid="proc_server", task_id="t2")
+        registry._running[mine.id] = mine
+        registry._running[other.id] = other
+
+        result = registry.list_sessions(task_id="t1", include_other_running=True)
+        by_id = {e["session_id"]: e for e in result}
+
+        assert by_id["proc_mine"]["scope"] == "task"
+        assert by_id["proc_server"]["scope"] == "other"
+
+    def test_include_other_running_excludes_exited_other_scope(self, registry):
+        """Only *running* out-of-scope processes are surfaced — a finished
+        process in another task is not the agent's concern."""
+        mine = _make_session(sid="proc_mine", task_id="t1")
+        dead_other = _make_session(sid="proc_dead", task_id="t2", exited=True, exit_code=0)
+        registry._running[mine.id] = mine
+        registry._finished[dead_other.id] = dead_other
+
+        result = registry.list_sessions(task_id="t1", include_other_running=True)
+        assert "proc_dead" not in {e["session_id"] for e in result}
+
 
 # =========================================================================
 # Active process queries
