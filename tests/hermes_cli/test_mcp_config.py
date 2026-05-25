@@ -216,13 +216,14 @@ class TestMcpAdd:
         assert "ink" in config.get("mcp_servers", {})
         assert config["mcp_servers"]["ink"]["url"] == "https://mcp.ml.ink/mcp"
 
-    def test_add_yes_flag_skips_tool_selection_prompt(self, tmp_path, capsys, monkeypatch):
-        """--yes auto-enables all discovered tools without the input() prompt.
+    def test_add_yes_flag_skips_all_interactive_prompts(self, tmp_path, capsys, monkeypatch):
+        """--yes runs cmd_mcp_add fully non-interactively for HTTP-no-auth.
 
-        Required for non-interactive callers (shell scripts, cron, CI). The
-        test wires input() with EXACTLY one entry ("n" for auth) — if the
-        tool-selection prompt still fires, the next input() would raise
-        StopIteration and the test fails. See #31970.
+        Wires input() to fail on ANY call — every prompt site (auth-confirm,
+        save-anyway, tool-selection) must be bypassed. The earlier scoped
+        version of this test only covered the tool-selection prompt; this
+        widened version pins the contract reviewer of #31979 asked about.
+        See #31970.
         """
         fake_tools = [
             FakeTool("create_service", "Deploy from repo"),
@@ -232,13 +233,13 @@ class TestMcpAdd:
         def mock_probe(name, config, **kw):
             return [(t.name, t.description) for t in fake_tools]
 
-        monkeypatch.setattr(
-            "hermes_cli.mcp_config._probe_single_server", mock_probe
-        )
-        # Exactly one input: "n" for "auth needed?". The tool-selection
-        # prompt must NOT consume a second input — that's the contract.
-        inputs = iter(["n"])
-        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setattr("hermes_cli.mcp_config._probe_single_server", mock_probe)
+
+        def _no_input_allowed(prompt=""):
+            raise AssertionError(
+                f"--yes must not block on any input() prompt; got: {prompt!r}"
+            )
+        monkeypatch.setattr("builtins.input", _no_input_allowed)
 
         from hermes_cli.mcp_config import cmd_mcp_add
 
@@ -246,13 +247,42 @@ class TestMcpAdd:
         out = capsys.readouterr().out
         assert "Saved" in out
         assert "2/2 tools" in out
-        # The --yes path emits an explicit info line so operators can see
-        # the prompt was skipped on purpose.
         assert "auto-enabling" in out
 
         from hermes_cli.config import load_config
         config = load_config()
         assert "auto" in config.get("mcp_servers", {})
+
+    def test_add_yes_with_auth_but_missing_env_var_fails_loudly(self, tmp_path, capsys, monkeypatch):
+        """--yes + --auth header but no MCP_*_API_KEY env var → hard error,
+        not a silent block on the password prompt.
+
+        Cron/CI that asked for auth without credentials should fail with an
+        actionable remediation hint (set the env var), never wedge on a
+        prompt nothing can answer. Reviewer carve-out for #31979.
+        """
+        def _probe_should_not_run(name, config, **kw):
+            raise AssertionError("--yes auth-missing path must error before probe")
+        monkeypatch.setattr("hermes_cli.mcp_config._probe_single_server", _probe_should_not_run)
+
+        def _no_input_allowed(prompt=""):
+            raise AssertionError(f"--yes must not prompt; got: {prompt!r}")
+        monkeypatch.setattr("builtins.input", _no_input_allowed)
+
+        from hermes_cli.mcp_config import cmd_mcp_add
+
+        cmd_mcp_add(_make_args(
+            name="needs-auth", url="https://mcp.example.com/mcp",
+            auth="header", yes=True,
+        ))
+        out = capsys.readouterr().out
+        # Loud, actionable error — names the env var the operator must set.
+        assert "--yes" in out
+        assert "MCP_NEEDS_AUTH_API_KEY" in out
+        # Did NOT save — the server was rejected non-interactively.
+        from hermes_cli.config import load_config
+        config = load_config()
+        assert "needs-auth" not in config.get("mcp_servers", {})
 
     def test_add_stdio_server(self, tmp_path, capsys, monkeypatch):
         """Add a stdio server."""
