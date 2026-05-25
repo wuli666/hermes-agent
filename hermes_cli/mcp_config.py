@@ -366,15 +366,23 @@ def cmd_mcp_add(args):
         print(f"    {color(tool_name, Colors.GREEN):40s} {short}")
     print()
 
-    # Ask: enable all, select, or cancel
-    try:
-        choice = input(
-            color(f"  Enable all {len(tools)} tools? [Y/n/select]: ", Colors.YELLOW)
-        ).strip().lower()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        _info("Cancelled.")
-        return
+    # Ask: enable all, select, or cancel — unless --yes/-y was passed,
+    # in which case skip the prompt and take the "enable all" branch (the
+    # empty / "y" default below). Matches `pip install -y`, `apt-get -y`,
+    # `hermes claw migrate --yes`. Required for shell scripts, cron, and
+    # CI/CD that can't drive an interactive prompt. See #31970.
+    if getattr(args, "yes", False):
+        _info(f"--yes: auto-enabling all {len(tools)} tools.")
+        choice = ""
+    else:
+        try:
+            choice = input(
+                color(f"  Enable all {len(tools)} tools? [Y/n/select]: ", Colors.YELLOW)
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            _info("Cancelled.")
+            return
 
     if choice in {"n", "no"}:
         _info("Cancelled — server not saved.")

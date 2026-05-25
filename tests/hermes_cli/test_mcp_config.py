@@ -216,6 +216,44 @@ class TestMcpAdd:
         assert "ink" in config.get("mcp_servers", {})
         assert config["mcp_servers"]["ink"]["url"] == "https://mcp.ml.ink/mcp"
 
+    def test_add_yes_flag_skips_tool_selection_prompt(self, tmp_path, capsys, monkeypatch):
+        """--yes auto-enables all discovered tools without the input() prompt.
+
+        Required for non-interactive callers (shell scripts, cron, CI). The
+        test wires input() with EXACTLY one entry ("n" for auth) — if the
+        tool-selection prompt still fires, the next input() would raise
+        StopIteration and the test fails. See #31970.
+        """
+        fake_tools = [
+            FakeTool("create_service", "Deploy from repo"),
+            FakeTool("list_services", "List all services"),
+        ]
+
+        def mock_probe(name, config, **kw):
+            return [(t.name, t.description) for t in fake_tools]
+
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server", mock_probe
+        )
+        # Exactly one input: "n" for "auth needed?". The tool-selection
+        # prompt must NOT consume a second input — that's the contract.
+        inputs = iter(["n"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        from hermes_cli.mcp_config import cmd_mcp_add
+
+        cmd_mcp_add(_make_args(name="auto", url="https://mcp.example.com/mcp", yes=True))
+        out = capsys.readouterr().out
+        assert "Saved" in out
+        assert "2/2 tools" in out
+        # The --yes path emits an explicit info line so operators can see
+        # the prompt was skipped on purpose.
+        assert "auto-enabling" in out
+
+        from hermes_cli.config import load_config
+        config = load_config()
+        assert "auto" in config.get("mcp_servers", {})
+
     def test_add_stdio_server(self, tmp_path, capsys, monkeypatch):
         """Add a stdio server."""
         fake_tools = [FakeTool("search", "Search repos")]
